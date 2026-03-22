@@ -17,7 +17,6 @@ jobs:
         echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
         sudo udevadm control --reload-rules
         sudo udevadm trigger --name-match=kvm
-        ls -la /dev/kvm
 
     - name: Install Node.js
       uses: actions/setup-node@v4
@@ -53,10 +52,8 @@ jobs:
           -k "system-images;android-33;google_apis;x86_64" \
           --device "pixel_4" \
           --force
-        echo "AVD created:"
-        avdmanager list avd
 
-    - name: Use reactivecircus emulator action
+    - name: Start emulator and run backend
       uses: reactivecircus/android-emulator-runner@v2
       with:
         api-level: 33
@@ -65,30 +62,6 @@ jobs:
         avd-name: droidweb_avd
         emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot
         disable-animations: true
-        script: |
-          echo "✅ Android emulator is running!"
-          adb devices
-
-          # Install Node.js backend & ngrok then run
-          node src/index.js &
-          sleep 4
-
-          ngrok config add-authtoken ${{ secrets.NGROK_TOKEN }}
-          ngrok http 3000 &
-          sleep 6
-
-          URL=$(curl -s http://localhost:4040/api/tunnels | python3 -c "import sys,json; print(json.load(sys.stdin)['tunnels'][0]['public_url'])")
-          echo ""
-          echo "========================================"
-          echo "  ✅ ANDROID EMULATOR IS LIVE!"
-          echo "  🌐 URL: $URL"
-          echo "  👉 Paste into droidweb.vercel.app"
-          echo "========================================"
-
-          # Keep alive for 6 hours
-          for i in $(seq 1 360); do
-            sleep 60
-            URL=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['tunnels'][0]['public_url'])" 2>/dev/null || echo "reconnecting")
-            BOOT=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || echo "?")
-            echo "[${i}min] Android:$BOOT | URL:$URL"
-          done
+        script: bash run.sh
+      env:
+        NGROK_TOKEN: ${{ secrets.NGROK_TOKEN }}
