@@ -1,12 +1,12 @@
 name: Android Emulator + ngrok
 
 on:
-  workflow_dispatch:  # Manual trigger — you press Run whenever you want
+  workflow_dispatch:
 
 jobs:
   emulator:
     runs-on: ubuntu-latest
-    timeout-minutes: 350  # ~6 hours
+    timeout-minutes: 350
 
     steps:
     - name: Checkout
@@ -17,6 +17,7 @@ jobs:
         echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
         sudo udevadm control --reload-rules
         sudo udevadm trigger --name-match=kvm
+        ls -la /dev/kvm
 
     - name: Install Node.js
       uses: actions/setup-node@v4
@@ -37,13 +38,14 @@ jobs:
     - name: Setup Android SDK
       uses: android-actions/setup-android@v3
 
-    - name: Install Android emulator packages
+    - name: Install emulator packages
       run: |
         sdkmanager --install \
           "system-images;android-33;google_apis;x86_64" \
           "platforms;android-33" \
           "platform-tools" \
           "emulator"
+        sdkmanager --list_installed
 
     - name: Create AVD
       run: |
@@ -52,8 +54,9 @@ jobs:
           -k "system-images;android-33;google_apis;x86_64" \
           --device "pixel_4" \
           --force
+        avdmanager list avd
 
-    - name: Start Android emulator
+    - name: Start emulator
       run: |
         nohup $ANDROID_SDK_ROOT/emulator/emulator \
           -avd droidweb_avd \
@@ -64,64 +67,72 @@ jobs:
           -memory 4096 \
           -cores 2 \
           -no-snapshot \
+          -no-accel \
           &>/tmp/emulator.log &
-        echo "Emulator started"
+        echo "Emulator PID: $!"
 
-    - name: Wait for Android to boot
+    - name: Wait for emulator (up to 15 min)
       run: |
-        echo "Waiting for Android to boot..."
-        for i in $(seq 1 60); do
-          BOOT=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
-          if [ "$BOOT" = "1" ]; then
-            echo "✅ Android booted!"
+        echo "Waiting for emulator to appear on ADB..."
+        for i in $(seq 1 180); do
+          DEVICES=$(adb devices 2>/dev/null)
+          echo "[$i] ADB devices: $DEVICES"
+          if echo "$DEVICES" | grep -q "emulator"; then
+            echo "✅ Emulator found on ADB!"
             break
           fi
-          echo "  Waiting... ${i}/60"
           sleep 5
         done
-        adb shell input keyevent 82 || true
-        adb shell input keyevent 4  || true
+
+        echo "Waiting for Android to fully boot..."
+        for i in $(seq 1 180); do
+          BOOT=$(adb -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r\n')
+          echo "[$i] Boot status: '$BOOT'"
+          if [ "$BOOT" = "1" ]; then
+            echo "✅ Android fully booted!"
+            break
+          fi
+          sleep 5
+        done
+
+        adb shell input keyevent 82 2>/dev/null || true
+        adb shell input keyevent 4  2>/dev/null || true
+        echo "Final ADB devices:"
         adb devices
+
+    - name: Show emulator log if failed
+      if: failure()
+      run: cat /tmp/emulator.log || true
 
     - name: Start Node.js backend
       run: |
         nohup node src/index.js &>/tmp/node.log &
-        sleep 3
-        echo "Node.js started"
-        curl -s http://localhost:3000/api/status || echo "Node not ready yet"
+        sleep 4
+        curl -s http://localhost:3000/api/status && echo "" || echo "Node starting..."
 
-    - name: Start ngrok tunnel
+    - name: Start ngrok
       env:
         NGROK_AUTHTOKEN: ${{ secrets.NGROK_TOKEN }}
       run: |
         ngrok config add-authtoken $NGROK_AUTHTOKEN
         nohup ngrok http 3000 &>/tmp/ngrok.log &
-        sleep 5
+        sleep 6
 
-    - name: Print your public URL
+    - name: Print public URL
       run: |
-        echo ""
-        echo "============================================"
-        echo "  ✅ YOUR ANDROID EMULATOR IS LIVE!"
-        echo "============================================"
         URL=$(curl -s http://localhost:4040/api/tunnels | python3 -c "import sys,json; print(json.load(sys.stdin)['tunnels'][0]['public_url'])")
         echo ""
-        echo "  🌐 Backend URL: $URL"
-        echo ""
-        echo "  👉 Paste this URL in your Vercel app"
-        echo "     droidweb.vercel.app → Backend URL field"
-        echo ""
-        echo "============================================"
-        echo "NGROK_URL=$URL" >> $GITHUB_ENV
+        echo "========================================"
+        echo "  ✅ ANDROID EMULATOR IS LIVE!"
+        echo "  🌐 URL: $URL"
+        echo "  👉 Paste into droidweb.vercel.app"
+        echo "========================================"
 
-    - name: Keep alive (up to 6 hours)
+    - name: Keep alive
       run: |
-        echo "Emulator running — keeping alive..."
         for i in $(seq 1 360); do
           sleep 60
-          # Check everything still running
-          BOOT=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
-          NODE=$(curl -s http://localhost:3000/api/status 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
-          URL=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['tunnels'][0]['public_url'])" 2>/dev/null)
-          echo "[${i}min] Android:${BOOT} Node:${NODE} URL:${URL}"
+          URL=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['tunnels'][0]['public_url'])" 2>/dev/null || echo "reconnecting")
+          BOOT=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || echo "?")
+          echo "[${i}min] Android:$BOOT | URL:$URL"
         done
