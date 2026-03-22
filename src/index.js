@@ -32,6 +32,9 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
+// Bypass ngrok browser warning
+app.use((req, res, next) => { res.setHeader("ngrok-skip-browser-warning", "true"); next(); });
+
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
