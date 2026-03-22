@@ -1,54 +1,35 @@
 #!/bin/bash
-# ── DroidWeb Docker Startup Script ──────────────────────────────────────────
+# ── DroidWeb Start Script (budtmo/docker-android base) ──────────────────────
 set -e
 
 echo "=== DroidWeb Backend Starting ==="
 
-# 1. Start virtual display (needed for emulator even in headless mode)
-echo "[1/4] Starting virtual display..."
-Xvfb :1 -screen 0 1080x1920x24 &
-export DISPLAY=:1
-sleep 2
+# 1. Start the Android emulator (budtmo handles this)
+echo "[1/3] Starting Android emulator..."
+/opt/android/start.sh &
+ANDROID_PID=$!
 
-# 2. Start Android emulator
-echo "[2/4] Starting Android emulator (this takes ~60 seconds)..."
-emulator \
-  -avd "${AVD_NAME:-droidweb_avd}" \
-  -no-window \
-  -no-audio \
-  -no-boot-anim \
-  -no-snapshot \
-  -gpu swiftshader_indirect \
-  -memory 2048 \
-  -cores 2 \
-  &
+# 2. Wait for ADB to be ready
+echo "[2/3] Waiting for Android to boot (60-90 seconds)..."
+export ADB=/opt/android/sdk/platform-tools/adb
 
-EMULATOR_PID=$!
-echo "Emulator PID: $EMULATOR_PID"
-
-# 3. Wait for ADB device to be ready
-echo "[3/4] Waiting for Android to boot..."
-MAX_WAIT=120
+MAX_WAIT=180
 COUNT=0
 while [ $COUNT -lt $MAX_WAIT ]; do
-  BOOT_STATUS=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
-  if [ "$BOOT_STATUS" = "1" ]; then
-    echo "Android booted successfully!"
+  BOOT=$($ADB shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+  if [ "$BOOT" = "1" ]; then
+    echo "Android booted!"
     break
   fi
-  echo "  Waiting... (${COUNT}s / ${MAX_WAIT}s)"
+  echo "  Waiting... ${COUNT}s"
   sleep 5
-  COUNT=$((COUNT + 5))
+  COUNT=$((COUNT+5))
 done
 
-if [ $COUNT -ge $MAX_WAIT ]; then
-  echo "WARNING: Emulator boot timeout — continuing anyway"
-fi
-
 # Unlock screen
-adb shell input keyevent 82 2>/dev/null || true
-adb shell input keyevent 4  2>/dev/null || true
+$ADB shell input keyevent 82 2>/dev/null || true
+$ADB shell input keyevent 4  2>/dev/null || true
 
-# 4. Start Node.js backend
-echo "[4/4] Starting DroidWeb Node.js backend..."
+# 3. Start Node.js server
+echo "[3/3] Starting Node.js backend..."
 exec node /app/src/index.js
