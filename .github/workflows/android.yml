@@ -1,0 +1,127 @@
+name: Android Emulator + ngrok
+
+on:
+  workflow_dispatch:  # Manual trigger — you press Run whenever you want
+
+jobs:
+  emulator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350  # ~6 hours
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Enable KVM
+      run: |
+        echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger --name-match=kvm
+
+    - name: Install Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 18
+
+    - name: Install backend dependencies
+      run: npm install
+
+    - name: Install ngrok
+      run: |
+        curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
+          | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+        echo "deb https://ngrok-agent.s3.amazonaws.com buster main" \
+          | sudo tee /etc/apt/sources.list.d/ngrok.list
+        sudo apt-get update && sudo apt-get install -y ngrok
+
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+
+    - name: Install Android emulator packages
+      run: |
+        sdkmanager --install \
+          "system-images;android-33;google_apis;x86_64" \
+          "platforms;android-33" \
+          "platform-tools" \
+          "emulator"
+
+    - name: Create AVD
+      run: |
+        echo "no" | avdmanager create avd \
+          -n droidweb_avd \
+          -k "system-images;android-33;google_apis;x86_64" \
+          --device "pixel_4" \
+          --force
+
+    - name: Start Android emulator
+      run: |
+        nohup $ANDROID_SDK_ROOT/emulator/emulator \
+          -avd droidweb_avd \
+          -no-window \
+          -no-audio \
+          -no-boot-anim \
+          -gpu swiftshader_indirect \
+          -memory 4096 \
+          -cores 2 \
+          -no-snapshot \
+          &>/tmp/emulator.log &
+        echo "Emulator started"
+
+    - name: Wait for Android to boot
+      run: |
+        echo "Waiting for Android to boot..."
+        for i in $(seq 1 60); do
+          BOOT=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+          if [ "$BOOT" = "1" ]; then
+            echo "✅ Android booted!"
+            break
+          fi
+          echo "  Waiting... ${i}/60"
+          sleep 5
+        done
+        adb shell input keyevent 82 || true
+        adb shell input keyevent 4  || true
+        adb devices
+
+    - name: Start Node.js backend
+      run: |
+        nohup node src/index.js &>/tmp/node.log &
+        sleep 3
+        echo "Node.js started"
+        curl -s http://localhost:3000/api/status || echo "Node not ready yet"
+
+    - name: Start ngrok tunnel
+      env:
+        NGROK_AUTHTOKEN: ${{ secrets.NGROK_TOKEN }}
+      run: |
+        ngrok config add-authtoken $NGROK_AUTHTOKEN
+        nohup ngrok http 3000 &>/tmp/ngrok.log &
+        sleep 5
+
+    - name: Print your public URL
+      run: |
+        echo ""
+        echo "============================================"
+        echo "  ✅ YOUR ANDROID EMULATOR IS LIVE!"
+        echo "============================================"
+        URL=$(curl -s http://localhost:4040/api/tunnels | python3 -c "import sys,json; print(json.load(sys.stdin)['tunnels'][0]['public_url'])")
+        echo ""
+        echo "  🌐 Backend URL: $URL"
+        echo ""
+        echo "  👉 Paste this URL in your Vercel app"
+        echo "     droidweb.vercel.app → Backend URL field"
+        echo ""
+        echo "============================================"
+        echo "NGROK_URL=$URL" >> $GITHUB_ENV
+
+    - name: Keep alive (up to 6 hours)
+      run: |
+        echo "Emulator running — keeping alive..."
+        for i in $(seq 1 360); do
+          sleep 60
+          # Check everything still running
+          BOOT=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+          NODE=$(curl -s http://localhost:3000/api/status 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
+          URL=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['tunnels'][0]['public_url'])" 2>/dev/null)
+          echo "[${i}min] Android:${BOOT} Node:${NODE} URL:${URL}"
+        done
