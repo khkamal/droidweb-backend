@@ -97,6 +97,7 @@ wss.on('connection', (ws) => {
     let msg; try { msg = JSON.parse(raw); } catch { return; }
     switch (msg.type) {
       case 'launch':        handleLaunch(sessionId, msg.app_id); break;
+      case 'stream_only':   startScreenStream(sessionId); break;
       case 'launch_intent': handleIntent(sessionId, msg.pkg, msg.label); break;
       case 'adb_cmd':       handleAdbCmd(msg.cmd, ws); break;
       case 'key':    handleKey(msg.key); break;
@@ -117,22 +118,38 @@ async function handleLaunch(sessionId, appId) {
   if (!session) return;
   const { ws } = session;
 
-  wsSend(ws, { type: 'log', text: `Launching ${appId}...`, level: 'info' });
+  wsSend(ws, { type: 'log', text: `Launching ${appId.substring(0,8)}...`, level: 'info' });
 
   const apkPath = path.join(UPLOAD_DIR, appId + '.apk');
 
   if (fs.existsSync(apkPath)) {
-    // Real APK upload
+    // APK already installed before? Just launch it
+    // Check if we have saved package name
+    const pkgFile = path.join(UPLOAD_DIR, appId + '.pkg');
+    if (fs.existsSync(pkgFile)) {
+      const pkg = fs.readFileSync(pkgFile, 'utf8').trim();
+      if (pkg) {
+        wsSend(ws, { type: 'log', text: `Launching ${pkg}`, level: 'info' });
+        exec(`${ADB} -s ${ADB_SERIAL} shell monkey -p ${pkg} -c android.intent.category.LAUNCHER 1`, { timeout: 8000 }, () => {});
+        await sleep(2000);
+        startScreenStream(sessionId);
+        return;
+      }
+    }
+    // First time - install it
     wsSend(ws, { type: 'log', text: 'Installing APK...', level: 'info' });
     await adbInstall(apkPath, ws);
     await sleep(2000);
-    await adbLaunchApk(apkPath, ws);
+    const pkg = await adbLaunchApk(apkPath, ws);
+    if (pkg) {
+      fs.writeFileSync(pkgFile, pkg);
+      wsSend(ws, { type: 'pkg', app_id: appId, pkg: pkg });
+    }
   } else {
-    // Built-in app
-    adbLaunchBuiltin(appId, ws);
+    wsSend(ws, { type: 'log', text: `Streaming current screen`, level: 'info' });
   }
 
-  await sleep(2000);
+  await sleep(1500);
   startScreenStream(sessionId);
 }
 
@@ -259,15 +276,15 @@ async function adbLaunchApk(apkPath, ws) {
 
 function launchPackage(pkg, ws, resolve) {
   if (!pkg) {
-    wsSend(ws, { type: 'log', text: 'Could not get package name — app may still be running', level: 'warn' });
-    resolve(); return;
+    wsSend(ws, { type: 'log', text: 'APK installed — streaming screen', level: 'warn' });
+    resolve(''); return;
   }
   wsSend(ws, { type: 'log', text: `Launching ${pkg}...`, level: 'info' });
   exec(`${ADB} -s ${ADB_SERIAL} shell monkey -p ${pkg} -c android.intent.category.LAUNCHER 1`,
     { timeout: 10000 }, (err) => {
       if (err) wsSend(ws, { type: 'log', text: 'Launch error: ' + err.message, level: 'error' });
       else wsSend(ws, { type: 'log', text: `${pkg} launched!`, level: 'info' });
-      resolve();
+      resolve(pkg);
     });
 }
 
