@@ -96,7 +96,9 @@ wss.on('connection', (ws) => {
   ws.on('message', (raw) => {
     let msg; try { msg = JSON.parse(raw); } catch { return; }
     switch (msg.type) {
-      case 'launch': handleLaunch(sessionId, msg.app_id); break;
+      case 'launch':        handleLaunch(sessionId, msg.app_id); break;
+      case 'launch_intent': handleIntent(sessionId, msg.pkg, msg.label); break;
+      case 'adb_cmd':       handleAdbCmd(msg.cmd, ws); break;
       case 'key':    handleKey(msg.key); break;
       case 'keycode': handleKeycode(msg.code); break;
       case 'text':    handleText(msg.text); break;
@@ -131,6 +133,26 @@ async function handleLaunch(sessionId, appId) {
   }
 
   await sleep(2000);
+  startScreenStream(sessionId);
+}
+
+// ── Launch by intent (system apps) ──
+async function handleIntent(sessionId, pkg, label) {
+  const session = sessions.get(sessionId);
+  if (!session) return;
+  const { ws } = session;
+  wsSend(ws, { type: 'log', text: `Opening ${label}...`, level: 'info' });
+  exec(`${ADB} -s ${ADB_SERIAL} shell am start -n ${pkg}`, { timeout: 8000 }, (err) => {
+    if (err) {
+      // Try monkey as fallback
+      const pkg2 = pkg.split('/')[0];
+      exec(`${ADB} -s ${ADB_SERIAL} shell monkey -p ${pkg2} -c android.intent.category.LAUNCHER 1`, { timeout: 8000 }, () => {});
+      wsSend(ws, { type: 'log', text: `Opening ${label} via launcher`, level: 'info' });
+    } else {
+      wsSend(ws, { type: 'log', text: `${label} opened`, level: 'info' });
+    }
+  });
+  await sleep(1500);
   startScreenStream(sessionId);
 }
 
