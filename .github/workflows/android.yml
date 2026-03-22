@@ -45,7 +45,6 @@ jobs:
           "platforms;android-33" \
           "platform-tools" \
           "emulator"
-        sdkmanager --list_installed
 
     - name: Create AVD
       run: |
@@ -54,85 +53,42 @@ jobs:
           -k "system-images;android-33;google_apis;x86_64" \
           --device "pixel_4" \
           --force
+        echo "AVD created:"
         avdmanager list avd
 
-    - name: Start emulator
-      run: |
-        nohup $ANDROID_SDK_ROOT/emulator/emulator \
-          -avd droidweb_avd \
-          -no-window \
-          -no-audio \
-          -no-boot-anim \
-          -gpu swiftshader_indirect \
-          -memory 4096 \
-          -cores 2 \
-          -no-snapshot \
-          -no-accel \
-          &>/tmp/emulator.log &
-        echo "Emulator PID: $!"
+    - name: Use reactivecircus emulator action
+      uses: reactivecircus/android-emulator-runner@v2
+      with:
+        api-level: 33
+        arch: x86_64
+        profile: pixel_4
+        avd-name: droidweb_avd
+        emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot
+        disable-animations: true
+        script: |
+          echo "✅ Android emulator is running!"
+          adb devices
 
-    - name: Wait for emulator (up to 15 min)
-      run: |
-        echo "Waiting for emulator to appear on ADB..."
-        for i in $(seq 1 180); do
-          DEVICES=$(adb devices 2>/dev/null)
-          echo "[$i] ADB devices: $DEVICES"
-          if echo "$DEVICES" | grep -q "emulator"; then
-            echo "✅ Emulator found on ADB!"
-            break
-          fi
-          sleep 5
-        done
+          # Install Node.js backend & ngrok then run
+          node src/index.js &
+          sleep 4
 
-        echo "Waiting for Android to fully boot..."
-        for i in $(seq 1 180); do
-          BOOT=$(adb -s emulator-5554 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r\n')
-          echo "[$i] Boot status: '$BOOT'"
-          if [ "$BOOT" = "1" ]; then
-            echo "✅ Android fully booted!"
-            break
-          fi
-          sleep 5
-        done
+          ngrok config add-authtoken ${{ secrets.NGROK_TOKEN }}
+          ngrok http 3000 &
+          sleep 6
 
-        adb shell input keyevent 82 2>/dev/null || true
-        adb shell input keyevent 4  2>/dev/null || true
-        echo "Final ADB devices:"
-        adb devices
+          URL=$(curl -s http://localhost:4040/api/tunnels | python3 -c "import sys,json; print(json.load(sys.stdin)['tunnels'][0]['public_url'])")
+          echo ""
+          echo "========================================"
+          echo "  ✅ ANDROID EMULATOR IS LIVE!"
+          echo "  🌐 URL: $URL"
+          echo "  👉 Paste into droidweb.vercel.app"
+          echo "========================================"
 
-    - name: Show emulator log if failed
-      if: failure()
-      run: cat /tmp/emulator.log || true
-
-    - name: Start Node.js backend
-      run: |
-        nohup node src/index.js &>/tmp/node.log &
-        sleep 4
-        curl -s http://localhost:3000/api/status && echo "" || echo "Node starting..."
-
-    - name: Start ngrok
-      env:
-        NGROK_AUTHTOKEN: ${{ secrets.NGROK_TOKEN }}
-      run: |
-        ngrok config add-authtoken $NGROK_AUTHTOKEN
-        nohup ngrok http 3000 &>/tmp/ngrok.log &
-        sleep 6
-
-    - name: Print public URL
-      run: |
-        URL=$(curl -s http://localhost:4040/api/tunnels | python3 -c "import sys,json; print(json.load(sys.stdin)['tunnels'][0]['public_url'])")
-        echo ""
-        echo "========================================"
-        echo "  ✅ ANDROID EMULATOR IS LIVE!"
-        echo "  🌐 URL: $URL"
-        echo "  👉 Paste into droidweb.vercel.app"
-        echo "========================================"
-
-    - name: Keep alive
-      run: |
-        for i in $(seq 1 360); do
-          sleep 60
-          URL=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['tunnels'][0]['public_url'])" 2>/dev/null || echo "reconnecting")
-          BOOT=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || echo "?")
-          echo "[${i}min] Android:$BOOT | URL:$URL"
-        done
+          # Keep alive for 6 hours
+          for i in $(seq 1 360); do
+            sleep 60
+            URL=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['tunnels'][0]['public_url'])" 2>/dev/null || echo "reconnecting")
+            BOOT=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || echo "?")
+            echo "[${i}min] Android:$BOOT | URL:$URL"
+          done
