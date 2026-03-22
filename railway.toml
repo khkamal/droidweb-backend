@@ -1,0 +1,18 @@
+# railway.toml — Railway.app deployment config for DroidWeb backend
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+buildCommand = ""
+
+[deploy]
+startCommand = "/docker-start.sh"
+healthcheckPath = "/api/status"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+
+[[services]]
+name = "droidweb-backend"
+
+[services.networking]
+tcpProxies = [{ applicationPort = 3000 }]
