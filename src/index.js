@@ -138,23 +138,50 @@ function startScreenStream(sessionId) {
   if (session.streamInterval) clearInterval(session.streamInterval);
 
   let frameCount = 0;
+  let errCount = 0;
   wsSend(session.ws, { type: 'log', text: 'Starting screen stream...', level: 'info' });
 
+  // Test screencap first
+  exec(`${ADB} -s ${ADB_SERIAL} shell screencap -p /sdcard/test_frame.png`, { timeout: 5000 }, (testErr) => {
+    if (testErr) {
+      wsSend(session.ws, { type: 'log', text: 'screencap test failed: ' + testErr.message, level: 'error' });
+    } else {
+      wsSend(session.ws, { type: 'log', text: 'screencap test OK — streaming...', level: 'info' });
+    }
+  });
+
   session.streamInterval = setInterval(() => {
-    exec(`${ADB} -s ${ADB_SERIAL} exec-out screencap -p`, { encoding: 'buffer', timeout: 4000 }, (err, buf) => {
-      if (err || !buf || buf.length < 200) {
-        if (err) console.log('[stream] screencap error:', err.message);
-        return;
-      }
+    // Use shell screencap save to file then pull — more reliable than exec-out
+    const tmpFile = `/tmp/frame_${sessionId}.png`;
+    exec(`${ADB} -s ${ADB_SERIAL} shell screencap -p /sdcard/frame.png && ${ADB} -s ${ADB_SERIAL} pull /sdcard/frame.png ${tmpFile}`,
+      { timeout: 5000 }, (err) => {
+        if (err) {
+          errCount++;
+          if (errCount % 10 === 1) console.log('[stream] frame error:', err.message);
+          // Fallback: try exec-out directly
+          exec(`${ADB} -s ${ADB_SERIAL} exec-out screencap -p`, { encoding: 'buffer', timeout: 4000 }, (err2, buf) => {
+            if (!err2 && buf && buf.length > 500) sendFrame(buf);
+          });
+          return;
+        }
+        // Read the pulled file
+        fs.readFile(tmpFile, (readErr, buf) => {
+          if (readErr || !buf || buf.length < 200) return;
+          sendFrame(buf);
+        });
+      });
+
+    function sendFrame(buf) {
       const b64 = buf.toString('base64');
       wsSend(session.ws, { type: 'frame', data: b64 });
       if (frameCount === 0) {
         wsSend(session.ws, { type: 'ready' });
-        wsSend(session.ws, { type: 'log', text: 'Screen streaming started!', level: 'info' });
+        wsSend(session.ws, { type: 'log', text: '✅ Screen streaming started!', level: 'info' });
       }
       frameCount++;
-    });
-  }, 300); // ~3 fps
+      errCount = 0;
+    }
+  }, 500); // 2 fps — reliable
 }
 
 // ── APK install ──
@@ -168,24 +195,40 @@ function adbInstall(apkPath, ws) {
   });
 }
 
-// ── Launch APK by extracting package with multiple methods ──
+// ── Launch APK — install then find package via pm list ──
 async function adbLaunchApk(apkPath, ws) {
   return new Promise((resolve) => {
-    // Method 1: aapt
-    exec(`aapt dump badging "${apkPath}" 2>/dev/null | grep "package: name" | sed "s/.*name='\\([^']*\\)'.*/\\1/"`,
-      { timeout: 10000 }, (err, out) => {
-        let pkg = (out || '').trim();
-
-        // Method 2: aapt2
-        if (!pkg) {
-          exec(`aapt2 dump packagename "${apkPath}" 2>/dev/null`, { timeout: 5000 }, (e2, o2) => {
-            pkg = (o2 || '').trim();
-            launchPackage(pkg, ws, resolve);
-          });
-        } else {
+    // Try aapt2 first (fastest)
+    exec(`aapt2 dump packagename "${apkPath}" 2>/dev/null`, { timeout: 6000 }, (err, out) => {
+      let pkg = (out || '').trim().split('\n')[0].trim();
+      if (pkg && pkg.includes('.')) {
+        launchPackage(pkg, ws, resolve);
+        return;
+      }
+      // Try aapt
+      exec(`aapt dump badging "${apkPath}" 2>/dev/null`, { timeout: 6000 }, (e2, o2) => {
+        const m = (o2||'').match(/package: name='([^']+)'/);
+        pkg = m ? m[1] : '';
+        if (pkg) {
           launchPackage(pkg, ws, resolve);
+          return;
         }
+        // Last resort: scan pm list for recently installed package
+        wsSend(ws, { type: 'log', text: 'Scanning installed packages...', level: 'info' });
+        exec(`${ADB} -s ${ADB_SERIAL} shell pm list packages -3 2>/dev/null`,
+          { timeout: 10000 }, (e3, o3) => {
+            const lines = (o3||'').trim().split('\n').filter(l => l.startsWith('package:'));
+            if (lines.length > 0) {
+              // Get last installed (most recent)
+              pkg = lines[lines.length - 1].replace('package:', '').trim();
+              launchPackage(pkg, ws, resolve);
+            } else {
+              wsSend(ws, { type: 'log', text: 'APK installed — open it from the Android home screen', level: 'warn' });
+              resolve();
+            }
+          });
       });
+    });
   });
 }
 
