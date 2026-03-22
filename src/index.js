@@ -98,7 +98,10 @@ wss.on('connection', (ws) => {
     switch (msg.type) {
       case 'launch': handleLaunch(sessionId, msg.app_id); break;
       case 'key':    handleKey(msg.key); break;
-      case 'touch':  handleTouch(msg); break;
+      case 'keycode': handleKeycode(msg.code); break;
+      case 'text':    handleText(msg.text); break;
+      case 'touch':   handleTouch(msg); break;
+      case 'adb':     handleAdbCmd(msg.cmd, ws); break;
       case 'restart': wsSend(ws, { type: 'log', text: 'Restart not needed — emulator managed by GitHub Actions', level: 'warn' }); break;
     }
   });
@@ -266,14 +269,46 @@ function adbLaunchBuiltin(appId, ws) {
 
 // ── Input ──
 function handleKey(key) {
-  const map = { back: 'KEYCODE_BACK', home: 'KEYCODE_HOME', recent: 'KEYCODE_APP_SWITCH', volumeup: 'KEYCODE_VOLUME_UP', volumedown: 'KEYCODE_VOLUME_DOWN', menu: 'KEYCODE_MENU' };
+  const map = {
+    back:       'KEYCODE_BACK',
+    home:       'KEYCODE_HOME',
+    recent:     'KEYCODE_APP_SWITCH',
+    volumeup:   'KEYCODE_VOLUME_UP',
+    volumedown: 'KEYCODE_VOLUME_DOWN',
+    menu:       'KEYCODE_MENU',
+    screenshot: 'KEYCODE_SYSRQ',
+    rotate:     'KEYCODE_ROTATE_90',
+  };
   const k = map[key];
   if (k) exec(`${ADB} -s ${ADB_SERIAL} shell input keyevent ${k}`);
 }
 
+function handleKeycode(code) {
+  // Direct keycode from keyboard input
+  exec(`${ADB} -s ${ADB_SERIAL} shell input keyevent ${code}`);
+}
+
+function handleText(text) {
+  // Type text character — escape special chars for shell
+  const escaped = text.replace(/[\\$`"'&|;<>(){}!#]/g, '\\$&').replace(/ /g, '%s');
+  exec(`${ADB} -s ${ADB_SERIAL} shell input text "${escaped}"`);
+}
+
 function handleTouch(msg) {
-  if (msg.gesture === 'tap') exec(`${ADB} -s ${ADB_SERIAL} shell input tap ${msg.x} ${msg.y}`);
-  else if (msg.gesture === 'swipe') exec(`${ADB} -s ${ADB_SERIAL} shell input swipe ${msg.x} ${msg.y} ${msg.x2} ${msg.y2} 300`);
+  if (msg.gesture === 'tap') {
+    exec(`${ADB} -s ${ADB_SERIAL} shell input tap ${msg.x} ${msg.y}`);
+  } else if (msg.gesture === 'swipe') {
+    const dur = msg.dur || 300;
+    exec(`${ADB} -s ${ADB_SERIAL} shell input swipe ${msg.x} ${msg.y} ${msg.x2} ${msg.y2} ${dur}`);
+  }
+}
+
+function handleAdbCmd(cmd, ws) {
+  if (!cmd) return;
+  const safe = cmd.replace(/[;&|`$]/g, '');
+  exec(`${ADB} -s ${ADB_SERIAL} ${safe}`, { timeout: 15000 }, (err, out, stderr) => {
+    wsSend(ws, { type: 'log', text: out || stderr || (err ? err.message : 'done'), level: err ? 'error' : 'info' });
+  });
 }
 
 // ── Utils ──
